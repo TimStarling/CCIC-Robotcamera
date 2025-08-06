@@ -1,0 +1,587 @@
+`define ZHANLIAN_THRESHOLD 5000   // 粘连
+`define SQUARE_THRESHOLD   3700   // 正方形面积阈值
+`define CIRCLE_THRESHOLD   2900   // 圆形面积阈值
+`define HEXAGON_THRESHOLD  2300   // 正六边形面积阈值
+`define TRIANGLE_THRESHOLD 1500   // 三角形面积阈值
+
+module Draw_box
+(
+    input               clk            ,
+    input               rst_n          ,
+    
+    input               din            ,
+    input               din_sop        ,
+    input               din_eop        ,
+    input               din_vld        ,  
+    
+    input               black_en       ,//有效区 
+    input               effect_en      ,//有效区  
+    input   [44:0]      target_pos     ,
+    input   [10:0]      x_cnt          ,
+    input   [10:0]      y_cnt          ,
+    input               en_color       ,
+    input   [1:0 ]      color_in       ,
+
+    output  reg [15:0]  dout           ,
+    output              dout_sop       ,
+    output              dout_eop       ,
+    output              dout_vld       ,
+
+    output reg [2:0]    shape_out      , //0 正方形 1 圆形 2 正六边形 3 三角形
+	
+    output reg [8:0]    X_center_ji    ,
+    output reg [8:0]    Y_center_ji    ,
+    output              tx_pin         ,// 串口发送
+    output reg          detect_finish  ,// 数据有效
+	output reg          zhanlian       ,// 粘连标志
+    output reg [9:0]    Box_theta_out
+);
+//--------------------- 时序控制 ---------------------
+reg     [1:0]    sop, eop, vld;
+reg              din_r        ; // 输入信号同步寄存器
+reg     [10:0]   x_cnt_r      ;
+reg     [10:0]   y_cnt_r      ;
+
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) {sop, eop, vld} <= 0;
+    else begin
+        sop     <= {sop[0], din_sop};
+        eop     <= {eop[0], din_eop};
+        vld     <= {vld[0], din_vld};
+        din_r   <= din;
+        x_cnt_r <= x_cnt; 
+        y_cnt_r <= y_cnt;
+    end
+end
+assign dout_sop = sop[1];
+assign dout_eop = eop[1];
+assign dout_vld = vld[1];
+
+
+//--------------------- 边界区域检测 ---------------------
+wire [10:0] X_center = ((target_pos[10:0 ] + target_pos[32:22]) >> 1);  //(xmin + xmax) /2
+wire [10:0] Y_center = ((target_pos[21:11] + target_pos[43:33]) >> 1);  //(ymin + ymax) /2
+
+//--------------------- 矩形框内判断 ---------------------
+wire Inside_box  =  (x_cnt_r >= target_pos[10:0 ] && x_cnt_r <= target_pos[32:22]) &&
+                    (y_cnt_r >= target_pos[21:11] && y_cnt_r <= target_pos[43:33]);
+
+//--------------------- 颜色计数器 ---------------------
+reg [15:0] black_count;
+reg [15:0] blue_count;
+reg [15:0] red_count;
+reg [15:0] yellow_count;
+
+// 新增计数器
+reg [15:0] inside_box_count;
+
+//--------------------- 输出处理 ---------------------
+
+wire Boundary_areas = (
+    // 上下边框
+    ((y_cnt_r == target_pos[21:11] || y_cnt_r == target_pos[43:33]) && (x_cnt_r >= target_pos[10:0 ] && x_cnt_r <= target_pos[32:22])) ||
+    // 左右边框
+    ((x_cnt_r == target_pos[10:0 ] || x_cnt_r == target_pos[32:22]) && (y_cnt_r >= target_pos[21:11] && y_cnt_r <= target_pos[43:33])) ||
+    // 中心十字标记
+    (y_cnt_r == Y_center) || (x_cnt_r == X_center)
+);
+
+// 合并后的时序逻辑块处理输出和颜色计数
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        dout             <= 16'd0;
+        shape_out        <= 3'd4 ;
+        inside_box_count <= 'd0  ;
+        zhanlian         <= 1'b0 ;
+    end 
+    else begin
+        if (vld[1]) begin
+            if (black_en) begin
+                dout <= 16'h0ff0;
+            end 
+            else if (effect_en) begin
+                dout <= 16'h07ff;
+            end 
+            else if (Boundary_areas) begin
+                dout <= 16'hF800;
+            end 
+            else if (Inside_box && din_r && !en_color) begin
+                inside_box_count <= inside_box_count + 1;
+                case (color_in)
+                    'd0: dout <= 16'hf800;
+                    'd1: dout <= 16'hffe0;
+                    'd2: dout <= 16'h001f;
+                    'd3: dout <= 16'h0007;
+                endcase
+            end 
+            else begin
+                dout <= din_r ? 16'hFFFF : 16'h0000;
+            end
+        end
+        if (eop[1]) begin // 一帧结束
+            // 根据像素点个数判断图形
+            if (inside_box_count >= `ZHANLIAN_THRESHOLD) begin
+                zhanlian  <= 1'b1; //粘连
+                shape_out <= 3'd4;
+            end
+            else if (inside_box_count >= `SQUARE_THRESHOLD) begin
+                shape_out <= 3'd0; // 正方形
+                zhanlian  <= 1'b0; 
+            end  
+            else if (inside_box_count >= `CIRCLE_THRESHOLD) begin
+                shape_out <= 3'd1; // 圆形
+                zhanlian  <= 1'b0; 
+            end
+            else if (inside_box_count >= `HEXAGON_THRESHOLD) begin
+                shape_out <= 3'd2; // 正六边形
+                zhanlian  <= 1'b0; 
+            end  
+            else if (inside_box_count >= `TRIANGLE_THRESHOLD) begin
+                shape_out <= 3'd3; // 三角形
+                zhanlian  <= 1'b0; 
+            end 
+            else
+                shape_out <= 3'd4;
+            //清零    
+            inside_box_count <= 0;
+        end
+    end
+end
+
+//--------------------- 坐标转换逻辑 ---------------------
+reg [10:0] X_center_reg;
+reg [10:0] Y_center_reg;
+reg [31:0] x_numerator;
+reg [31:0] y_numerator;
+
+// 常数定义（根据位宽调整）
+localparam DIV600_FACTOR = 18'd1095;  // 438 * 2.5
+localparam DIV40_FACTOR  = 18'd4095;  // 1638 * 2.5
+
+always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        X_center_reg <= 'd0;
+        Y_center_reg <= 'd0;
+        X_center_ji  <= 'd0;
+        Y_center_ji  <= 'd0;
+        x_numerator  <= 'd0;
+        y_numerator  <= 'd0;
+        detect_finish<= 'b0;
+    end 
+    else if(target_pos != 'b0) //数据有效
+        begin
+        // 寄存原始中心坐标
+        X_center_reg <= X_center;
+        Y_center_reg <= Y_center;
+        
+        // 第一级：计算分子
+        x_numerator <= 106 * (940 + 60 - X_center_reg);  //60偏移量
+        y_numerator <= (Y_center_reg - 160) * 7;
+        
+        // 第二级：乘法与移位
+        X_center_ji <= (x_numerator * DIV600_FACTOR) >> 18;
+        Y_center_ji <= (y_numerator * DIV40_FACTOR)  >> 16; 
+
+        if(X_center_ji>256) X_center_ji<=255;
+		if(Y_center_ji>175) Y_center_ji<=174;
+        detect_finish <= 1'b1;          //识别完成目标有效
+    end
+    else begin
+        detect_finish <= 1'b0;
+    end
+end
+
+reg [6:0]  Box_offse_x         ;
+reg [6:0]  Box_offse_y         ;
+reg [3:0]  Box_state           ;
+reg [9:0]  Box_state_wait_cnt  ;
+
+wire start_point = ((x_cnt_r == target_pos[10: 0]) &&  (y_cnt_r == target_pos[21:11]))  ;
+wire end_point   = ((x_cnt_r == target_pos[32:22]) &&  (y_cnt_r == target_pos[43:33]))  ;
+
+wire Box_x = target_pos[32:22] - target_pos[10: 0];
+wire Box_y = target_pos[43:33] - target_pos[21:11];
+
+
+always @(posedge clk or negedge rst_n) begin    //X
+    if (!rst_n) begin
+        Box_offse_x         <= 'b0;
+        Box_offse_y         <= 'b0;
+        Box_offse_x_out     <= 'b0;
+        Box_offse_y_out     <= 'b0;
+        Box_state           <= 'b0;
+        Arctan_addr         <= 'b0;
+        Box_state_wait_cnt  <= 'b0;
+    end
+    else begin
+        case (Box_state)
+            'd0:begin
+                Box_offse_x  <= 'b0;
+                Box_offse_y  <= 'b0;
+                if (start_point) begin
+                    Box_state <= Box_state + 1'b1;
+                end
+            end 
+            'd1:begin
+                if (shape_out == 0) begin //正方形
+                    Box_state <= 'd2;
+                end
+                if (shape_out == 3) begin //三角形
+                    Box_state <= 'd5;
+                end
+            end 
+            //正方形
+            'd2:begin
+                if (y_cnt_r == target_pos[21:11]) begin
+                    if(din_r)
+                        Box_state <= Box_state + 1'b1; 
+                    else
+                        Box_offse_x <= Box_offse_x +1'b1;       
+                end
+            end 
+            'd3:begin
+                if (x_cnt_r == target_pos[10:0]) begin
+                    if(din_r)
+                        Box_state <= Box_state + 1'b1;
+                    else
+                        Box_offse_y <= Box_offse_y +1'b1;   
+                end
+            end 
+            'd4:begin
+                if (end_point) begin
+                    Arctan_addr <= {Box_offse_x[6:1],Box_offse_y[6:1]};
+                    Box_state   <= Box_state + 1'b1;
+                end
+            end
+			'd5:begin
+				if(Box_state_wait_cnt == 2)begin //等待两篇两拍取出数据
+                    Box_theta_out <= Box_theta;
+					Box_state_wait_cnt<= 'b0;
+                    Box_state <= 0; //回到开始
+				end
+                else begin
+                    Box_state_wait_cnt <= Box_state_wait_cnt + 1'b1;
+                end
+			end
+            //三角形
+            'd6:begin
+                if (y_cnt_r == target_pos[21:11]) begin
+                    if(din_r)
+                        Box_state <= Box_state + 1'b1; 
+                    else
+                        Box_offse_x <= Box_offse_x +1'b1;       
+                end
+            end 
+            'd7:begin
+                if (x_cnt_r == target_pos[10:0]) begin
+                    if(din_r)
+                        Box_state <= Box_state + 1'b1;
+                    else
+                        Box_offse_y <= Box_offse_y +1'b1;   
+                end
+            end 
+            'd8:begin
+                if (end_point) begin
+                    Box_offse_x_out <=Box_offse_x[6:1];
+                    Box_offse_y_out <=Box_offse_y[6:1];
+                    Box_state <= 'd0;
+                end
+            end
+        endcase
+    end
+end
+
+wire [9:0]  Box_theta;
+reg  [9:0]  Arctan_addr;
+
+Arctan_rom u_Arctan_rom (
+        /*input	    [9:0]  */.address  (Arctan_addr  ),
+        /*input	           */.clock    (clk          ),
+        /*output	[9:0]  */.q        (Box_theta    )
+    );
+
+	
+	
+	
+
+
+
+
+// //--------------------- 新增UART发送逻辑 ---------------------
+reg [15:0] count1_r       ;
+reg [15:0] count2_r       ;
+reg [15:0] count3_r       ;
+reg [15:0] count4_r       ;
+reg [15:0] count5_r       ;
+reg [15:0] count6_r       ;
+    
+// UART实例化
+uart_tx#
+(
+	.CLK_FRE(84),
+	.BAUD_RATE(115200)
+) uart_tx_inst
+(
+/*input      */.clk                        (clk                      ),
+/*input      */.rst_n                      (rst_n                    ),
+/*input[7:0] */.tx_data                    (tx_data                  ),
+/*input      */.tx_data_valid              (tx_data_valid            ),  //高电平发送
+/*output reg */.tx_data_ready              (tx_data_ready            ),  //高电平空闲
+/*output     */.tx_pin                     (tx_pin                   )
+);
+
+reg[7:0]      tx_data;
+reg[42*8-1:0] tx_str;
+reg           tx_data_valid;
+wire          tx_data_ready;
+reg[7:0]      tx_cnt;
+reg[3:0]      state;
+reg[31:0]     wait_cnt;
+
+
+reg [7:0] Bit		;//个位
+reg [7:0] Ten_bits	;//十位
+reg [7:0] Hundred	;//百位
+reg [7:0] kilobit	;//千位
+							
+always@(posedge clk or negedge rst_n)
+begin
+	if(!rst_n)
+	begin
+		tx_data       <= 8'd0;
+		state         <= 4'd0;
+		tx_cnt        <= 8'd0;
+		tx_data_valid <= 1'b0;
+        wait_cnt      <=  'd0;
+
+        Bit		      <= 8'h30;
+        Ten_bits      <= 8'h30;
+        Hundred	      <= 8'h30;
+        kilobit	      <= 8'h30;
+        tx_str        <=   'b0;  //42个字;
+	end
+	else
+	case(state)
+		'd0:
+            begin
+                if (eop[1]) begin
+                    state <= 'd1;
+                    tx_str         <="A:0000,B:0000,C:0000,D:0000,E:0000,F:0000," ;  //42个字;
+                    count1_r       <= inside_box_count                       ;
+                    count2_r       <= target_pos[32:22] - target_pos[10:0]   ;
+                    count3_r       <= target_pos[43:33] - target_pos[21:11]  ;
+                    count4_r       <= Box_theta_out                          ;
+                    count5_r       <= 0                                      ;
+                    count6_r       <= shape_out                              ;
+                    Bit		       <= 8'h30  ;
+                    Ten_bits       <= 8'h30  ;
+                    Hundred	       <= 8'h30  ;
+                    kilobit	       <= 8'h30  ;
+                end
+            end
+        'd1:    //RED
+            if (count1_r >= 1000) begin
+                count1_r <= count1_r - 1000;
+                kilobit <= kilobit + 1'b1;
+                state <= state;
+            end
+            else if (count1_r >= 100) begin
+                count1_r <= count1_r - 100;
+                Hundred <= Hundred + 1'b1;
+                state <= state;
+            end
+            else if (count1_r >= 10) begin
+                count1_r <= count1_r - 10;
+                Ten_bits <= Ten_bits + 1'b1;
+                state <= state;
+            end
+            else begin
+                Bit[3:0] <= count1_r;
+                state <= state + 1'b1;
+            end
+        'd2:   
+            begin
+                tx_str[40*8-1:36*8] <= {kilobit,Hundred,Ten_bits,Bit};  
+                state  <= state +1'b1;
+                Bit		      <= 8'h30;
+                Ten_bits      <= 8'h30;
+                Hundred	      <= 8'h30;
+                kilobit	      <= 8'h30;
+            end
+        'd3:   //YELLOW
+            if (count2_r >= 1000) begin
+                count2_r <= count2_r - 1000;
+                kilobit <= kilobit + 1'b1;
+                state <= state;
+            end
+            else if (count2_r >= 100) begin
+                count2_r <= count2_r - 100;
+                Hundred <= Hundred + 1'b1;
+                state <= state;
+            end
+            else if (count2_r >= 10) begin
+                count2_r <= count2_r - 10;
+                Ten_bits <= Ten_bits + 1'b1;
+                state <= state;
+            end
+            else begin
+                Bit[3:0] <= count2_r;
+                state <= state + 1'b1;
+            end
+        'd4:   
+            begin
+                tx_str[33*8-1:29*8] <= {kilobit,Hundred,Ten_bits,Bit};  //56个字
+                state  <= state +1'b1;
+                Bit		      <= 8'h30;
+                Ten_bits      <= 8'h30;
+                Hundred	      <= 8'h30;
+                kilobit	      <= 8'h30;
+            end
+        'd5:   //BLUE
+            if (count3_r >= 1000) begin
+                count3_r <= count3_r - 1000;
+                kilobit <= kilobit + 1'b1;
+                state <= state;
+            end
+            else if (count3_r >= 100) begin
+                count3_r <= count3_r - 100;
+                Hundred <= Hundred + 1'b1;
+                state <= state;
+            end
+            else if (count3_r >= 10) begin
+                count3_r <= count3_r - 10;
+                Ten_bits <= Ten_bits + 1'b1;
+                state <= state;
+            end
+            else begin
+                Bit[3:0] <= count3_r;
+                state <= state + 1'b1;
+            end
+        'd6:   
+            begin
+                tx_str[26*8-1:22*8] <= {kilobit,Hundred,Ten_bits,Bit} ; //56个字
+                state  <= state +1'b1;
+                Bit		      <= 8'h30;
+                Ten_bits      <= 8'h30;
+                Hundred	      <= 8'h30;
+                kilobit	      <= 8'h30;
+            end
+        'd7:   //BLACK
+            if (count4_r >= 1000) begin
+                count4_r <= count4_r - 1000;
+                kilobit <= kilobit + 1'b1;
+                state <= state;
+            end
+            else if (count4_r >= 100) begin
+                count4_r <= count4_r - 100;
+                Hundred <= Hundred + 1'b1;
+                state <= state;
+            end
+            else if (count4_r >= 10) begin
+                count4_r <= count4_r - 10;
+                Ten_bits <= Ten_bits + 1'b1;
+                state <= state;
+            end
+            else begin
+                Bit[3:0] <= count4_r;
+                state <= state + 1'b1;
+            end
+        'd8:   
+            begin
+                tx_str[19*8-1:15*8] <= {kilobit,Hundred,Ten_bits,Bit};  //56个字
+                state  <= state +1'b1;
+                Bit		      <= 8'h30;
+                Ten_bits      <= 8'h30;
+                Hundred	      <= 8'h30;
+                kilobit	      <= 8'h30;
+            end
+        'd9:   //X
+		    if (count5_r >= 1000) begin
+                count5_r <= count5_r - 1000;
+                kilobit <= kilobit + 1'b1;
+                state <= state;
+				end
+            else if (count5_r >= 100) begin
+                count5_r <= count5_r - 100;
+                Hundred <= Hundred + 1'b1;
+                state <= state;
+            end
+            else if (count5_r >= 10) begin
+                count5_r <= count5_r - 10;
+                Ten_bits <= Ten_bits + 1'b1;
+                state <= state;
+            end
+            else begin
+                Bit[3:0] <= count5_r;
+                state <= state + 1'b1;
+            end
+        'd10:   
+            begin
+                tx_str[12*8-1:8*8] <= {kilobit,Hundred,Ten_bits,Bit};  //56个字
+                state  <= state +1'b1;
+                Bit		      <= 8'h30;
+                Ten_bits      <= 8'h30;
+                Hundred	      <= 8'h30;
+                kilobit	      <= 8'h30;
+            end
+        'd11:   //Y
+			if (count6_r >= 1000) begin
+                count6_r <= count6_r - 1000;
+                kilobit <= kilobit + 1'b1;
+                state <= state;
+			end
+            else if (count6_r >= 100) begin
+                count6_r <= count6_r - 100;
+                Hundred <= Hundred + 1'b1;
+                state <= state;
+            end
+            else if (count6_r >= 10) begin
+                count6_r <= count6_r - 10;
+                Ten_bits <= Ten_bits + 1'b1;
+                state <= state;
+            end
+            else begin
+                Bit[3:0] <= count6_r;
+                state <= state + 1'b1;
+            end
+        'd12:   
+            begin
+                tx_str[5*8-1:1*8] <= {kilobit,Hundred,Ten_bits,Bit};  //56个字
+                state  <= state +1'b1;
+            end
+		'd13:
+            begin
+                tx_data <= tx_str[42*8-1:41*8];
+                if(tx_data_valid == 1'b1 && tx_data_ready == 1'b1 && tx_cnt < 8'd42)//Send 15 bytes data
+                begin
+                    tx_str <= tx_str<<8;
+                    tx_cnt <= tx_cnt + 8'd1; //Send data counter
+                end
+                else if(tx_data_valid && tx_data_ready)//last byte sent is complete
+                begin
+                    tx_cnt <= 8'd0;
+                    tx_data_valid <= 1'b0;
+                    state <= state +1'b1;
+                end
+                else if(~tx_data_valid)
+                begin
+                    tx_data_valid <= 1'b1;
+                end
+            end
+		'd14:
+            begin
+				// wait_cnt <= wait_cnt + 1'b1;
+                // if(wait_cnt == 19_999_999) begin 
+                //     state <= 'd0;
+                //     wait_cnt <= 'd0;
+                // end
+				// else
+                state <= 0;
+            end
+		default:
+			state <= 'd0;
+	endcase
+end
+
+
+endmodule    

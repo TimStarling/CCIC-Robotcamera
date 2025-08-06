@@ -1,0 +1,277 @@
+`include"param.v"
+
+`define ENABLE_GAUSS  1
+
+module imag_process(
+    input           clk                 ,
+    input           rst_n               ,
+    
+    input           din_sop             ,
+    input           din_eop             ,
+    input           din_vld             ,
+    input   [15:0]  din                 ,//RGB565
+        
+    input           en_color            ,//用于选择全部颜色输出
+    input           Sel_VGA_out         ,//用于选择ycbcr还是二值输出
+        
+    input   [2:0]   target_cnt          ,
+        
+    output          dout_sop            ,
+    output          dout_eop            ,
+    output          dout_vld            ,
+    output  [15:0]  dout                ,
+    output  [3:0]   led_out             ,
+    output  [8:0]   X_center_ji         ,//识别后的x,y坐标
+    output  [8:0]   Y_center_ji         ,
+        
+    input   [1:0]   color_out           ,
+    output  [2:0]   shape_out           ,
+
+    output          tx_pin              ,// 串口发送 
+    output          detect_finish       ,// 数据有效
+    output          target_is_invalid    // 无目标
+);
+
+//信号定义
+    wire            gray_sop    ; 
+    wire            gray_eop    ; 
+    wire            gray_vld    ; 
+    
+    wire    [7:0]   Y_dout      ;
+    wire    [7:0]   Cb_dout     ;
+    wire    [7:0]   Cr_dout     ;
+
+    wire    [7:0]   drow_Y      ;
+    wire    [7:0]   drow_Cb     ;
+    wire    [7:0]   drow_Cr     ;
+    
+    wire            binary_sop  ; 
+    wire            binary_eop  ; 
+    wire            binary_vld  ; 
+    wire            binary      ; 
+
+    wire            sobel       ; 
+    wire            sobel_sop   ; 
+    wire            sobel_eop   ; 
+    wire            sobel_vld   ; 
+
+    wire            Erosion     ;
+    wire            Erosion_sop ;
+    wire            Erosion_eop ;
+    wire            Erosion_vld ;
+
+    wire            Dilation     ;
+    wire            Dilation_sop ;
+    wire            Dilation_eop ;
+    wire            Dilation_vld ;
+
+    wire            Shape        ;
+    wire            Shape_sop    ;
+    wire            Shape_eop    ;
+    wire            Shape_vld    ;
+    wire   [44:0]   target_pos   ;
+    wire   [44:0]   target_pos_1   ;
+    wire   [15:0]   Drowbox      ;
+    wire            Drowbox_sop  ;
+    wire            Drowbox_eop  ;
+    wire            Drowbox_vld  ;
+    wire            Black_en     ;
+    wire            Effect_en    ;
+
+    assign  led_out = {color_out,shape_out[1:0]}  ;
+    //模块例化
+ rgb2ycbcr u_gray(
+    /*input           */.clk         (clk       ),
+    /*input           */.rst_n       (rst_n     ),
+    /*input           */.din_sop     (din_sop   ),
+    /*input           */.din_eop     (din_eop   ),
+    /*input           */.din_vld     (din_vld   ),
+    /*input   [15:0]  */.din         (din       ),//RGB565
+    /*output          */.dout_sop    (gray_sop  ),
+    /*output          */.dout_eop    (gray_eop  ),
+    /*output          */.dout_vld    (gray_vld  ),
+    /*output  [7:0]   */.Y_dout      (Y_dout    ),//灰度输出
+    /*output  [7:0]   */.Cb_dout     (Cb_dout   ),//灰度输出
+    /*output  [7:0]   */.Cr_dout     (Cr_dout   ) //灰度输出
+);
+
+Delay_YCbCr u_Delay_YCbCr(
+    /*input           */.clk         (clk        ),
+    /*input           */.rst_n       (rst_n      ),
+
+    /*input   [7:0]   */.din_Y       (Y_dout     ),
+    /*input   [7:0]   */.din_Cb      (Cb_dout    ),
+    /*input   [7:0]   */.din_Cr      (Cr_dout    ),
+
+    /*output  [7:0]   */.dout_Y      (drow_Y     ),
+    /*output  [7:0]   */.dout_Cb     (drow_Cb    ),
+    /*output  [7:0]   */.dout_Cr     (drow_Cr    )
+);
+
+// assign dout_sop = gray_sop;
+// assign dout_eop = gray_eop; 
+// assign dout_vld = gray_vld;
+// assign dout     = {Y_dout[7:3], Cb_dout[7:2], Cr_dout[7:3]};
+
+    // wire            gs_dout_sop ;     //高斯滤波，效果不好
+    // wire            gs_dout_eop ; 
+    // wire            gs_dout_vld ; 
+    // wire    [7:0]   gs_dout     ; 
+
+    // gauss_filter u_guass(
+    // /*input           */.clk         (clk           ),
+    // /*input           */.rst_n       (rst_n         ),
+    // /*input           */.din_sop     (gray_sop      ),
+    // /*input           */.din_eop     (gray_eop      ),
+    // /*input           */.din_vld     (gray_vld      ),
+    // /*input   [7:0]   */.din         (Y_dout        ),//灰度输入
+    // /*output          */.dout_sop    (gs_dout_sop   ),
+    // /*output          */.dout_eop    (gs_dout_eop   ),
+    // /*output          */.dout_vld    (gs_dout_vld   ),
+    // /*output  [7:0]   */.dout        (gs_dout       ) //灰度输出     
+    // );
+
+    ycbcr2bin  u_ycbcr2bin(
+    /*input           */.clk         (clk           ),
+    /*input           */.rst_n       (rst_n         ),
+    /*input           */.din_sop     (gray_sop      ),
+    /*input           */.din_eop     (gray_eop      ),
+    /*input           */.din_vld     (gray_vld      ),
+    /*output  [1:0]   */.color_sel   (color_out     ),
+    /*input           */.en_color    (en_color      ),//高电平输出全部颜色二值 
+    /*input   [7:0]   */.Y           (Y_dout        ),//灰度输入
+    /*input   [7:0]   */.Cb          (Cb_dout       ),//灰度输入
+    /*input   [7:0]   */.Cr          (Cr_dout       ),//灰度输入
+    /*output          */.dout_sop    (binary_sop    ),
+    /*output          */.dout_eop    (binary_eop    ),
+    /*output          */.dout_vld    (binary_vld    ),
+    /*output          */.dout        (binary        ) //二值输出  
+);
+
+// assign dout_sop = binary_sop;
+// assign dout_eop = binary_eop; 
+// assign dout_vld = binary_vld;
+// assign dout     = {16{binary}}; 
+
+    Erosion u_Erosion(       //腐蚀操作
+    /*input           */.clk     (clk           ),
+    /*input           */.rst_n   (rst_n         ),
+    /*input           */.din     (binary        ),//输入二值图像
+    /*input           */.din_sop (binary_sop    ),
+    /*input           */.din_eop (binary_eop    ),
+    /*input           */.din_vld (binary_vld    ),
+    /*output          */.dout    (Erosion       ),
+    /*output          */.dout_sop(Erosion_sop   ),
+    /*output          */.dout_eop(Erosion_eop   ),
+    /*output          */.dout_vld(Erosion_vld   ) 
+);
+
+// assign dout_sop = Erosion_sop;
+// assign dout_eop = Erosion_eop; 
+// assign dout_vld = Erosion_vld;
+// assign dout     = {16{Erosion}}; 
+
+Dilation u_Dilation(       //膨胀操作
+   /*input           */.clk     (clk           ),
+   /*input           */.rst_n   (rst_n         ),
+   /*input           */.din     (Erosion       ),//输入二值图像
+   /*input           */.din_sop (Erosion_sop   ),
+   /*input           */.din_eop (Erosion_eop   ),
+   /*input           */.din_vld (Erosion_vld   ),
+   /*output          */.dout    (Dilation      ),
+   /*output          */.dout_sop(Dilation_sop  ),
+   /*output          */.dout_eop(Dilation_eop  ),
+   /*output          */.dout_vld(Dilation_vld  ) 
+);
+//assign dout_sop = Dilation_sop;
+//assign dout_eop = Dilation_eop; 
+//assign dout_vld = Dilation_vld;
+//assign dout     = {16{Dilation}}; 
+
+// sobel u_sobel( 
+//    /*input           */.clk     (clk        ),
+//    /*input           */.rst_n   (rst_n      ),
+//    /*input           */.din     (Erosion    ),//输入二值图像
+//    /*input           */.din_sop (Erosion_sop),
+//    /*input           */.din_eop (Erosion_eop),
+//    /*input           */.din_vld (Erosion_vld),
+//    /*output          */.dout    (sobel      ),
+//    /*output          */.dout_sop(sobel_sop  ),
+//    /*output          */.dout_eop(sobel_eop  ),
+//    /*output          */.dout_vld(sobel_vld  )
+//
+// );
+// assign dout_sop = sobel_sop;
+// assign dout_eop = sobel_eop; 
+// assign dout_vld = sobel_vld;
+// assign dout     = {16{sobel}}; 
+
+Shape_Detector u_Shape_Detector
+(
+    /*input                */.clk                    (clk                   ),
+    /*input                */.rst_n                  (rst_n                 ),
+    /*input                */.din                    (Dilation              ),//输入二值图像
+    /*input                */.din_sop                (Dilation_sop          ),
+    /*input                */.din_eop                (Dilation_eop          ),
+    /*input                */.din_vld                (Dilation_vld          ),
+    /*input        [2:0]   */.target_cnt             (target_cnt            ),
+    /*output   reg [40:0]  */.target_pos_out         (target_pos            ),//{标志位，ymax[39:30],xmax[29:20],ymin[19:10],xmin[9:0]} 右下角x，y，左上角x,y
+    /*output   reg [40:0]  */.target_pos_out_1       (target_pos_1          ),//{标志位，ymax[39:30],xmax[29:20],ymin[19:10],xmin[9:0]} 右下角x，y，左上角x,y
+    /*output               */.dout_sop               (Shape_sop             ),                    
+    /*output               */.dout_eop               (Shape_eop             ),
+    /*output               */.dout_vld               (Shape_vld             ),
+    /*output  reg [15:0]   */.dout                   (Shape                 ),// 输出RGB565图像数据
+    /*output               */.x_cnt_r                (x_cnt                 ),
+    /*output               */.y_cnt_r                (y_cnt                 ),    
+    /*output               */.black_en               (Black_en              ),
+    /*output               */.effect_en              (Effect_en             ),
+    /*output               */.target_is_invalid      (target_is_invalid     )
+);   
+
+// assign dout_sop = Shape_sop  ;
+// assign dout_eop = Shape_eop  ; 
+// assign dout_vld = Shape_vld  ;
+// assign dout     = Shape      ; 
+
+wire     [10:0]    x_cnt;
+wire     [10:0]    y_cnt;
+
+Draw_box u_Drawbox
+(
+	/*input               */.clk                (clk           ),
+    /*input               */.rst_n              (rst_n         ),
+
+    /*input               */.din                (Shape         ),
+    /*input               */.din_sop            (Shape_sop     ),
+    /*input               */.din_eop            (Shape_eop     ),
+    /*input               */.din_vld            (Shape_vld     ),
+
+    /*input               */.black_en           (Black_en      ),//有效区	
+    /*input               */.effect_en          (Effect_en     ),//有效区		
+	/*input       [44:0]  */.target_pos         (target_pos    ), 
+	/*input       [44:0]  */.target_pos_1       (target_pos_1  ),  
+    /*input               */.x_cnt              (x_cnt         ),
+    /*input               */.y_cnt              (y_cnt         ), 
+    /*input   [1:0 ]      */.color_in           (color_out     ),
+    /*input               */.en_color           (en_color      ),//高电平输出全部颜色二值 
+
+	/*output  reg [15:0]  */.dout               (Drowbox       ),
+	/*output              */.dout_sop           (Drowbox_sop   ),
+    /*output              */.dout_eop           (Drowbox_eop   ),
+    /*output              */.dout_vld           (Drowbox_vld   ),
+
+    /*output reg [2:0]    */.shape_out          (shape_out     ),
+    /*output reg [6:0]    */.X_center_ji        (X_center_ji   ),
+    /*output reg [6:0]    */.Y_center_ji        (Y_center_ji   ),
+    /*output              */.tx_pin             (tx_pin        ),// 串口发送
+    /*output              */.detect_finish      (detect_finish ) // 设别完成
+);
+
+assign dout     = Sel_VGA_out ? Drowbox     : {Y_dout[7:3], Cb_dout[7:2], Cr_dout[7:3]}; 
+assign dout_sop = Sel_VGA_out ? Drowbox_sop : gray_sop  ;
+assign dout_eop = Sel_VGA_out ? Drowbox_eop : gray_eop  ;  
+assign dout_vld = Sel_VGA_out ? Drowbox_vld : gray_vld  ;
+
+
+endmodule 
+

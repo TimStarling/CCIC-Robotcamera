@@ -1,0 +1,183 @@
+module Shape_Detector
+#(
+    parameter          IMG_HDISP   = 600    ,// 检测有效区
+    parameter          IMG_VDISP   = 400    ,  
+    parameter          IMG_EFFECT  = 20     ,//有效区//20
+    parameter          MIN_DIST    = 3     ,//相邻像素判断为同一目标距离//5
+    parameter          MIN_Box     = 10     ,//小方框最小外围距离
+    parameter          MAX_BOX     = 95      // 红框最大边长//85
+)
+(
+    input               clk                 ,
+    input               rst_n               ,
+    input               din                 ,
+    input               din_sop             ,
+    input               din_eop             ,
+    input               din_vld             ,
+    
+    input       [2:0]   target_cnt          ,
+
+    output  reg [44:0]  target_pos_out      ,
+    output  reg [44:0]  target_pos_out_1    ,
+    output              dout_sop            ,
+    output              dout_eop            ,
+    output              dout_vld            ,
+    output  reg         dout                ,
+    output  reg [10:0]  x_cnt_r             ,
+    output  reg [10:0]  y_cnt_r             ,
+    output              black_en            ,
+    output              effect_en           ,
+    output  reg         target_is_invalid      //无目标
+);
+
+//--------------------- 时序控制 ---------------------
+reg [1:0] sop, eop, vld;
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) {sop, eop, vld} <= 0;
+    else begin
+        sop <= {sop[0], din_sop};
+        eop <= {eop[0], din_eop};
+        vld <= {vld[0], din_vld};
+    end
+end
+assign dout_sop = sop[1];
+assign dout_eop = eop[1];
+assign dout_vld = vld[1];
+
+//--------------------- 坐标计数器 ---------------------
+//信号定义
+reg     [10:0]    x_cnt ;
+reg     [10:0]    y_cnt ;
+
+always @(posedge clk or negedge rst_n) begin//标记x，y坐标
+    if(~rst_n)begin
+        x_cnt <= 11'd0;
+        y_cnt <= 11'd0;
+    end
+    else if(din_sop)begin                   //开始帧置零
+        x_cnt <= 11'd0;
+        y_cnt <= 11'd0;
+    end
+    else if(din_vld)begin                 
+        if (x_cnt < 1279) begin
+            x_cnt <= x_cnt + 1'd1;
+            y_cnt <= y_cnt;
+            x_cnt_r <= x_cnt;              //寄存x，y坐标
+        end
+        else begin
+            x_cnt <= 11'd0;
+            y_cnt <= y_cnt + 1'd1;
+            y_cnt_r <= y_cnt;
+        end
+    end
+end
+
+
+//--------------------- 显示区域计算 ---------------------
+wire [10:0] effect_start_x = 60 + ((1280 -   IMG_HDISP) >> 1'd1);
+wire [10:0] effect_start_y =  0 + ((720  -   IMG_VDISP) >> 1'd1);
+wire [10:0] effect_end_x   = effect_start_x + IMG_HDISP  ;
+wire [10:0] effect_end_y   = effect_start_y + IMG_VDISP  ; 
+
+assign   effect_en = (
+    // 上下边框
+    ((y_cnt_r == effect_start_y || y_cnt_r == effect_end_y) && (x_cnt_r >= effect_start_x && x_cnt_r <= effect_end_x)) ||
+    // 左右边框
+    ((x_cnt_r == effect_start_x || x_cnt_r == effect_end_x) && (y_cnt_r >= effect_start_y && y_cnt_r <= effect_end_y))
+);
+//--------------------- 有效区域计算 ---------------------
+wire [10:0] start_x = 60 + ((1280 -   (IMG_HDISP + IMG_EFFECT)) >> 1'd1);  //有效区右移动60
+wire [10:0] start_y =  0 + ((720  -   (IMG_VDISP + IMG_EFFECT)) >> 1'd1);
+wire [10:0] end_x   = start_x + (IMG_HDISP + IMG_EFFECT)    ;
+wire [10:0] end_y   = start_y + (IMG_VDISP + IMG_EFFECT)    ; 
+
+assign  black_en = (x_cnt_r < start_x) || (x_cnt_r > end_x) || (y_cnt_r < start_y) || (y_cnt_r > end_y);
+
+//--------------------- 目标检测核心逻辑 ---------------------
+reg [44:0] target_pos ; // {valid, ymax, xmax, ymin, xmin}
+reg [44:0] target_pos_1;
+
+wire [10:0] target_bottom  =  (target_pos[43:33] < end_y     - MIN_DIST  )? (target_pos[43:33] + MIN_DIST) : end_y   ; //下边界的像素坐标
+wire [10:0] target_right   =  (target_pos[32:22] < end_x     - MIN_DIST  )? (target_pos[32:22] + MIN_DIST) : end_x   ; //右边界的像素坐标
+wire [10:0] target_top 	   =  (target_pos[21:11] > start_y   + MIN_DIST  )? (target_pos[21:11] - MIN_DIST) : start_y ; //上边界的像素坐标
+wire [10:0] target_left    =  (target_pos[10:0]  > start_x   + MIN_DIST  )? (target_pos[10:0 ] - MIN_DIST) : start_x ; //左边界的像素坐标
+	
+
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        target_pos <= 45'd0;
+    end
+    else if(sop[0]) begin
+        target_pos <= 45'd0;
+    end
+    else if(vld[0] && din && !black_en) begin   //在区域范围内以及非已检测区域
+        if(!target_pos[44]) begin // 新目标检测
+            target_pos <= {1'b1, y_cnt, x_cnt, y_cnt, x_cnt};
+            target_pos_1 <= {1'b1, y_cnt, x_cnt, y_cnt, x_cnt};
+        end
+        else begin // 扩展已有目标
+            if((x_cnt >= target_left) && (x_cnt <= target_right) && (y_cnt >= target_top) && (y_cnt <= target_bottom)) begin
+                target_pos[44] <= 1'b1; 
+                if(x_cnt <= target_pos[10: 0] && (target_pos[32:22] - target_pos[10: 0] <= MAX_BOX))  begin//若X坐标小于左边界，则将其X坐标扩展为左边界
+                    target_pos[10: 0] <= x_cnt ;     //防止粘连   左角点(x,y){target_pos[10: 0],target_pos_1[10:0]}
+                    target_pos_1[10:0] <=y_cnt;
+                end
+                if(x_cnt >= target_pos[32:22] && (target_pos[32:22] - target_pos[10: 0] <= MAX_BOX)) begin //若X坐标大于右边界，则将其X坐标扩展为右边界
+                    target_pos[32:22] <= x_cnt ;       //右角点
+                    target_pos_1[32:22] <=y_cnt;   
+                end               
+                if(y_cnt <= target_pos[21:11] && (target_pos[43:33] - target_pos[21:11] <= MAX_BOX)) begin //若Y坐标小于上边界，则将其Y坐标扩展为上边界
+                    target_pos[21:11] <= y_cnt ;
+                    target_pos_1[21:11] <=x_cnt;       //上角点
+                end
+                if(y_cnt >= target_pos[43:33] && (target_pos[43:33] - target_pos[21:11] <= MAX_BOX))begin  //若Y坐标大于下边界，则将其Y坐标扩展为下边界
+                    target_pos[43:33] <= y_cnt ;     
+                    target_pos_1[43:33] <= x_cnt ;     //下角点     
+                end 
+            end
+        end
+    end
+end
+//第二拍
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        dout <= 1'b0;
+    end
+    else if(vld[1]) begin
+        dout <= din;
+    end 
+end
+
+wire null_box = (target_pos[32:22] - target_pos[10: 0] >= 30)&&  //xmax - xmin > 60
+                (target_pos[43:33] - target_pos[21:11] >= 30)&&  //ymax - ymin > 60
+                target_pos[44];
+
+reg [3:0] eop_cnt;
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        target_pos_out    <= 'd0;
+        target_pos_out_1  <= 'd0;
+        eop_cnt           <= 'b0;
+        target_is_invalid <= 1'b0;  
+    end
+    else if(eop[0])begin    //帧结束输出
+        if (null_box) begin //数据有效输出
+            target_pos_out    <= target_pos;
+            target_pos_out_1  <=target_pos_1;
+            eop_cnt           <= 'b0;
+            target_is_invalid <= 1'b0;
+        end
+        else begin
+            target_pos_out <= 'b0;  //数据无效
+            target_pos_out_1<=0;
+            eop_cnt <= eop_cnt + 1'b1;
+            if (eop_cnt == 10) begin
+                eop_cnt <= 'b0;
+                target_is_invalid <= 1'b1;  //连续10帧没有目标
+            end
+        end
+    end
+
+end
+
+endmodule

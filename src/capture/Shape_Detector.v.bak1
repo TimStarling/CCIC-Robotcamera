@@ -1,0 +1,179 @@
+module Shape_Detector
+#(
+    parameter          IMG_HDISP   = 10'd900,  // 检测有效区
+    parameter          IMG_VDISP   = 10'd600,
+    parameter          MIN_DIST    = 10'd5  ,  //相邻像素判断为同一目标距离
+    parameter          MIN_Box     = 10'd10 ,  // 方框外围距离
+    parameter          MAX_TARGETS = 16        // 增加可配置参数
+)
+(
+    input               clk,
+    input               rst_n,
+    input               din,
+    input               din_sop,
+    input               din_eop,
+    input               din_vld,
+    output  reg [44:0]  target_pos_out,
+    output              dout_sop,
+    output              dout_eop,
+    output              dout_vld,
+    output  reg         dout    ,
+    output              black_en
+);
+
+//--------------------- 时序控制 ---------------------
+reg [1:0] sop, eop, vld;
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) {sop, eop, vld} <= 0;
+    else begin
+        sop <= {sop[0], din_sop};
+        eop <= {eop[0], din_eop};
+        vld <= {vld[0], din_vld};
+    end
+end
+assign dout_sop = sop[1];
+assign dout_eop = eop[1];
+assign dout_vld = vld[1];
+
+//--------------------- 坐标计数器 ---------------------
+//信号定义
+reg     [10:0]    x_cnt , x_cnt_r      ;
+reg     [10:0]    y_cnt , y_cnt_r      ;
+
+always @(posedge clk or negedge rst_n) begin//标记x，y坐标
+    if(~rst_n)begin
+        x_cnt <= 11'd0;
+        y_cnt <= 11'd0;
+    end
+    else if(din_sop)begin                   //开始帧置零
+        x_cnt <= 11'd0;
+        y_cnt <= 11'd0;
+    end
+    else if(din_vld)begin                 
+        if (x_cnt < 1279) begin
+            x_cnt <= x_cnt + 1'd1;
+            y_cnt <= y_cnt;
+            x_cnt_r <= x_cnt;              //寄存x，y坐标
+        end
+        else begin
+            x_cnt <= 11'd0;
+            y_cnt <= y_cnt + 1'd1;
+            y_cnt_r <= y_cnt;
+        end
+    end
+end
+
+//--------------------- 有效区域计算 ---------------------
+wire [10:0] start_x = (1280 - IMG_HDISP) >> 1'd1;
+wire [10:0] start_y = (720  - IMG_VDISP) >> 1'd1;
+wire [10:0] end_x   = start_x + IMG_HDISP    ;
+wire [10:0] end_y   = start_y + IMG_VDISP    ; 
+
+assign  black_en = (x_cnt_r < start_x) || (x_cnt_r > end_x) || (y_cnt_r < start_y) || (y_cnt_r > end_y);
+
+//--------------------- 目标检测核心逻辑 ---------------------
+reg [44:0] target_pos ; // {valid, ymax, xmax, ymin, xmin}
+
+wire [10:0] target_bottom  =  (target_pos[43:33] < end_y     - MIN_DIST  )? (target_pos[43:33] + MIN_DIST) : end_y   ; //下边界的像素坐标
+wire [10:0] target_right   =  (target_pos[32:22] < end_x     - MIN_DIST  )? (target_pos[32:22] + MIN_DIST) : end_x   ; //右边界的像素坐标
+wire [10:0] target_top 	   =  (target_pos[21:11] > start_y   + MIN_DIST  )? (target_pos[21:11] - MIN_DIST) : start_y ; //上边界的像素坐标
+wire [10:0] target_left    =  (target_pos[10:0]  > start_x   + MIN_DIST  )? (target_pos[10:0 ] - MIN_DIST) : start_x ; //左边界的像素坐标
+	
+
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        target_pos <= 45'd0;
+    end
+    else if(sop[0]) begin
+        target_pos <= 45'd0;
+    end
+    else if(vld[0] && din && !black_en && !null_en) begin   //在区域范围内以及非已检测区域
+        if(!target_pos[44]) begin // 新目标检测
+            target_pos <= {1'b1, y_cnt, x_cnt, y_cnt, x_cnt};
+        end
+        else begin // 扩展已有目标
+            if((x_cnt_r >= target_left) && (x_cnt_r <= target_right) && (y_cnt_r >= target_top) && (y_cnt_r <= target_bottom)) begin
+                 // 更新边界
+                target_pos <= {1'b1,//标志位
+                    (y_cnt_r > target_pos[43:33]) ? y_cnt_r : target_pos[43:33], // ymax  若Y坐标大于下边界，则将其Y坐标扩展为下边界
+                    (x_cnt_r > target_pos[32:22]) ? x_cnt_r : target_pos[32:22], // xmax  若X坐标大于右边界，则将其X坐标扩展为右边界
+                    (y_cnt_r < target_pos[21:11]) ? y_cnt_r : target_pos[21:11], // ymin  若Y坐标小于上边界，则将其Y坐标扩展为上边界
+                    (x_cnt_r < target_pos[10:0 ]) ? x_cnt_r : target_pos[10:0 ]  // xmin  若X坐标小于左边界，则将其X坐标扩展为左边界
+                };             
+            end
+        end
+    end
+    //第二拍
+    else if (vld[1]) begin
+        dout <= din;
+    end
+end
+
+
+//--------------------- 多目标检测逻辑 ---------------------
+reg [44:0]  target_pos_r [0:MAX_TARGETS-1]; // 使用参数化尺寸  {valid, ymax, xmax, ymin, xmin}
+reg [3:0]   target_count;
+
+reg [15:0]  empty_en;    //已检测区域
+reg         null_en     ;//已检测区域总和
+
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        target_count   <= 16'd0;
+    end
+    else if(eop[0]) begin //帧结束输出
+        target_pos_r[target_count] <= target_pos;
+    end 
+    else if(eop[1]) begin
+        target_count = target_count + 1'd1;
+        end 
+end
+
+// 这是延时输出，方便观察现象，最后可去掉
+reg [31:0]  cnt_clk;
+reg [ 3:0]  cnt_out;
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        cnt_clk  <= 32'd0;
+        cnt_out  <= 4'd0;
+        target_pos_out <= 45'd0;
+    end else begin
+        cnt_clk <= cnt_clk + 1'd1;
+        // 输出选择器优化
+        if(cnt_clk == 12_500_000 || cnt_clk == 24_999_999) begin
+            cnt_out <= cnt_out + 1'd1;
+        end
+        // 安全访问保护
+        target_pos_out <= (cnt_out < MAX_TARGETS) ? target_pos_r[cnt_out] : 45'd0;
+    end
+end
+
+// 使用generate简化区域检测逻辑  将检测过的标记为无效区 下一帧不检测该坐标位置
+genvar i;
+generate 
+for (i=0; i<MAX_TARGETS; i=i+1) begin : INVALID_AREA_GEN
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            empty_en[i] <= 1'b0;
+        end else begin
+            empty_en[i] <= (
+                (x_cnt_r > (target_pos_r[i][10:0 ] - MIN_Box)) &&
+                (x_cnt_r < (target_pos_r[i][32:22] + MIN_Box)) &&
+                (y_cnt_r > (target_pos_r[i][21:11] - MIN_Box)) &&
+                (y_cnt_r < (target_pos_r[i][43:33] + MIN_Box))
+            );
+        end
+    end
+end
+endgenerate
+//--------------------- 无效区域综合 -------------------- 
+always @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+        null_en <= 1'd0;
+    end else begin
+        null_en <= |empty_en;  // 使用位或简化逻辑
+      //null_en <= empty_en[0] || empty_en[1] || empty_en[2] || empty_en[3] || empty_en[4] || empty_en[5] || empty_en[6] || empty_en[7] || empty_en[8] || empty_en[9] || empty_en[10] || empty_en[11] || empty_en[12] || empty_en[13] || empty_en[14] || empty_en[15];    
+    end 
+end
+
+endmodule

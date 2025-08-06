@@ -1,0 +1,246 @@
+`include "param.v"
+
+module top(
+    input               clk     ,
+    input               rst_n   ,
+
+    //摄像头接口
+    input               cmos_vsync      ,
+    input               cmos_pclk       ,
+    input               cmos_href       ,
+    input   [7:0]       cmos_din        ,
+    
+    output              cmos_xclk       ,
+    output              cmos_pwdn       ,
+    output              cmos_reset      ,
+    output              cmos_scl        ,
+    inout               cmos_sda        ,
+    //sdram
+    output              sdram_clk       ,
+    output              sdram_cke       ,   
+    output              sdram_csn       ,   
+    output              sdram_rasn      ,   
+    output              sdram_casn      ,   
+    output              sdram_wen       ,   
+    output  [1:0]       sdram_bank      ,   
+    output  [12:0]      sdram_addr      ,   
+    inout   [15:0]      sdram_dq        ,   
+    output  [1:0]       sdram_dqm       ,
+    //vga接口
+    output  [15:0]      vga_rgb         , 
+    output              vga_hsync       ,
+    output              vga_vsync       ,
+    //串口接口
+    input               rx_pin          ,// 调试串口接收引脚
+    output              tx_pin          ,// 调试串口发送引脚
+    output              Robot_TX        ,// 机械臂串口发送引脚
+    output              Pump_TX         ,// 气泵串口
+    //拨码开关
+    input               en_color        ,
+    input               Sel_VGA_out     ,
+    input               Sel_A_B         ,//高A仓库，低b仓库
+    input               VGA_process_out ,//选择原始图像与处理图像
+    output  [3:0]       led_out       
+);
+
+//信号定义  
+    wire            cfg_done        ;
+    wire            clk_cmos        ;
+    wire    [15:0]  pixel           ; 
+    wire            pixel_vld       ; 
+    wire            pixel_sop       ; 
+    wire            pixel_eop       ; 
+
+    wire            mem_din_sop     ; 
+    wire            mem_din_eop     ; 
+    wire            mem_din_vld     ; 
+    wire    [15:0]  mem_din         ; 
+
+    wire            clk_100m        ;
+    wire            clk_100m_s      ;
+    wire            clk_vga         ;
+    wire            pclk            ;
+    wire            rd_req          ; 
+    wire    [15:0]  dout            ; 
+    wire            dout_vld        ; 
+    
+    assign sys_rst_n = rst_n & cfg_done;
+    assign cmos_xclk = clk_cmos;
+    assign sdram_clk = clk_100m_s;
+
+//模块例化
+    pll0 u_pll0(
+	.areset (~rst_n     ),
+	.inclk0 (clk_50M    ),
+	.c0     (clk_cmos   ),
+    .c1     (clk_vga    )
+   );
+    
+    pll1 u_pll1(
+	.areset (~rst_n     ),
+	.inclk0 (clk_50M    ),
+	.c0     (clk_100m   ),
+	.c1     (clk_100m_s ),
+	.locked ()
+    );
+
+
+    iobuf u_iobuf(
+	.datain     (cmos_pclk  ),
+    .dataout    (pclk       )
+    );
+
+    iobuf u_clk_iobuf(
+    .datain     (clk        ),
+    .dataout    (clk_50M    )
+    );
+    
+
+    cmos_top u_cmos(
+    /*input           */.clk                     (clk_50M              ),
+    /*input           */.rst_n                   (rst_n                ),
+    /*output          */.scl                     (cmos_scl             ),
+    /*inout           */.sda                     (cmos_sda             ),
+    /*output          */.pwdn                    (cmos_pwdn            ),
+    /*output          */.reset                   (cmos_reset           ),
+    /*output          */.cfg_done                (cfg_done             )
+    );
+
+    capture u_capture(
+    /*input           */.clk                     (pclk                 ),
+    /*input           */.rst_n                   (rst_n                ),
+    /*input           */.vsync                   (cmos_vsync           ),
+    /*input           */.href                    (cmos_href            ),
+    /*input   [7:0]   */.din                     (cmos_din             ),
+    /*input           */.enable                  (cfg_done             ),
+    /*output  [15:0]  */.dout                    (pixel                ),
+    /*output          */.dout_vld                (pixel_vld            ),
+    /*output          */.dout_sop                (pixel_sop            ),
+    /*output          */.dout_eop                (pixel_eop            )
+    );
+
+    wire            ip_dout_sop     ; 
+    wire            ip_dout_eop     ; 
+    wire            ip_dout_vld     ; 
+    wire    [15:0]  ip_dout         ; 
+
+    imag_process u_imag_process(
+    /*input           */.clk                    (pclk                  ),
+    /*input           */.rst_n                  (rst_n                 ),
+    /*input           */.din_sop                (pixel_sop             ),
+    /*input           */.din_eop                (pixel_eop             ),
+    /*input           */.din_vld                (pixel_vld             ),
+    /*input   [15:0]  */.din                    (pixel                 ),//RGB565
+    /*input   [1:0]   */.en_color               (en_color              ),
+    /*input           */.Sel_VGA_out            (Sel_VGA_out           ),//用于选择ycbcr还是二值输出
+    /*input   [2:0]   */.target_cnt             (target_cnt            ),
+    /*output          */.dout_sop               (ip_dout_sop           ),
+    /*output          */.dout_eop               (ip_dout_eop           ),
+    /*output          */.dout_vld               (ip_dout_vld           ),
+    /*output  [15:0]  */.dout                   (ip_dout               ),
+    /*output          */.led_out                (led_out               ),
+    /*output reg [6:0]*/.X_center_ji            (X_center_ji           ),
+    /*output reg [6:0]*/.Y_center_ji            (Y_center_ji           ),
+    /*output  [1:0]   */.color_out              (color_out             ),
+    /*output  [2:0]   */.shape_out              (shape_out             ),
+    /*output          */.tx_pin                 (tx_pin                ),// 串口发送 
+    /*output          */.target_is_invalid      (target_is_invalid     ),
+    /*output          */.detect_finish          (detect_finish         ) // 串口发送
+    );
+    
+    assign mem_din     =/*VGA_process_out ? pixel     : */ip_dout    ; 
+    assign mem_din_vld =/*VGA_process_out ? pixel_vld : */ip_dout_vld; 
+    assign mem_din_sop =/*VGA_process_out ? pixel_sop : */ip_dout_sop; 
+    assign mem_din_eop =/*VGA_process_out ? pixel_eop : */ip_dout_eop;
+
+
+//机械臂控制代码
+wire     [8:0]      X_center_ji         ;
+wire     [8:0]      Y_center_ji         ;
+        
+wire      [1:0]      color_out           ;
+wire     [2:0]      shape_out           ;
+        
+wire     [2:0]      target_cnt          ;
+wire                target_is_invalid   ;
+wire                detect_finish       ;
+
+reg    [1:0]     color;
+reg	 [31:0]   color_cnt    ;
+
+assign color_out=color;
+always @(posedge clk or negedge rst_n) begin
+	if (!rst_n) begin
+		color <= 'd0;
+		color_cnt <= 'b0;
+	end
+	else if (target_is_invalid) begin     //图像内两秒无目标切换颜色
+        if (color_cnt == 49_999_999) begin
+		    color_cnt <= 'b0;
+		    color <= color +1'b1;
+	    end
+	    else 
+		    color_cnt <= color_cnt +1'b1;
+    end
+    else begin
+        color_cnt <= 'b0;
+    end
+end
+
+// Robot_control_top u_Robot_control_top(
+//     /*input              */.clk                 (clk_50M             ),
+//     /*input              */.rst_n               (rst_n               ),
+//     /*input     [6:0]	 */.X		            (X_center_ji         ),  //有符号数  单位mm
+//     /*input     [6:0]	 */.Y		            (Y_center_ji         ),
+//     /*input              */.Sel_A_B             (Sel_A_B             ) ,//高A仓库，低b仓库
+//     /*input              */.detect_val          (detect_finish       ) ,//数据有效
+//     /*input              */.target_is_invalid   (target_is_invalid   ) ,//数据有效
+//     /*input     [2:0]    */.shape_in            (shape_out           ),
+//     /*output    [1:0]    */.color_sel           (color_out           ),
+//     /*output    [1:0]    */.target_cnt          (target_cnt          ),
+//     /*output 	         */.Pump_TX	            (Pump_TX             ),
+//     /*output 	         */.Robot_TX            (Robot_TX            ),
+//     /*output 	         */.tx_pin              (/*tx_pin*/              )
+//     );
+
+
+    sdram_controller u_meme_controller(
+    /*input              */.clk                 (clk_100m            ),//100M 控制器主时钟
+    /*input              */.clk_in              (pclk                ),//数据输入时钟
+    /*input              */.clk_out             (clk_vga             ),//数据输出时钟
+    /*input              */.rst_n               (rst_n               ),
+    /*input   [15:0]     */.din                 (mem_din             ),
+    /*input              */.din_vld             (mem_din_vld         ),
+    /*input              */.din_sop             (mem_din_sop         ),
+    /*input              */.din_eop             (mem_din_eop         ),
+    /*input              */.rd_req              (rd_req              ),//读请求
+    /*output  [15:0]     */.dout                (dout                ),//
+    /*output             */.dout_vld            (dout_vld            ),
+    //sdram接口         
+    /*output             */.cke                 (sdram_cke           ),
+    /*output             */.csn                 (sdram_csn           ),
+    /*output             */.rasn                (sdram_rasn          ),
+    /*output             */.casn                (sdram_casn          ),
+    /*output             */.wen                 (sdram_wen           ),
+    /*output  [1:0]      */.bank                (sdram_bank          ),
+    /*output  [12:0]     */.addr                (sdram_addr          ),
+    /*inout   [15:0]     */.dq                  (sdram_dq            ),
+    /*output  [1:0]      */.dqm                 (sdram_dqm           )    
+);
+
+   vga_interface u_vga(
+   /*input               */.clk                 (clk_vga             ),
+   /*input               */.rst_n               (sys_rst_n           ),
+   /*input   [15:0]      */.din                 (dout                ),
+   /*input               */.din_vld             (dout_vld            ),
+   /*output              */.rdy                 (rd_req              ),
+   /*output  [15:0]      */.vga_rgb             (vga_rgb             ),
+   /*output              */.vga_hsync           (vga_hsync           ),
+   /*output              */.vga_vsync           (vga_vsync           )
+   );
+
+endmodule
+
+
+
+
