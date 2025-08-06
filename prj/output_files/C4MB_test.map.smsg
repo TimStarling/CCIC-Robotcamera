@@ -1,0 +1,1 @@
+Info (10281): Verilog HDL Declaration information at key_detect.v(38): object "TIM_COUNT" differs only in case from object "tim_count" in the same scope File: F:/C4MB-V1.5-4096Robot2(5)(1)/src/Robot/Robot_rtl/key_detect.v Line: 38

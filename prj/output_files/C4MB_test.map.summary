@@ -1,0 +1,14 @@
+Analysis & Synthesis Status : Successful - Mon Jul 07 20:27:00 2025
+Quartus Prime Version : 18.0.0 Build 614 04/24/2018 SJ Standard Edition
+Revision Name : C4MB_test
+Top-level Entity Name : top
+Family : Cyclone IV E
+Total logic elements : 4,914
+    Total combinational functions : 4,283
+    Dedicated logic registers : 1,858
+Total registers : 1858
+Total pins : 87
+Total virtual pins : 0
+Total memory bits : 106,180
+Embedded Multiplier 9-bit elements : 7
+Total PLLs : 2
